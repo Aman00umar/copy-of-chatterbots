@@ -187,19 +187,5 @@ PY
           echo -e "$BODY" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Create GitHub Release and upload artifacts
-        if: startsWith(github.ref, 'refs/tags/') && runner.os == 'Linux'
-        uses: ncipollo/release-action@v1
-        with:
-          tag: ${{ github.ref_name }}
-          name: ${{ steps.generate.outputs.name }}
-          body: ${{ steps.generate.outputs.body }}
-          files: |
-            dist/**
-            build/**
-            out/**
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Complete
         run: echo "Packaging complete on ${RUNNER_OS}"
