@@ -1,0 +1,77 @@
+{
+  "name": "aman",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "homepage": "./",
+  "scripts": {
+    "dev": "vite --port 3000",
+    "generate-icons": "node ./scripts/generate-icons.cjs",
+    "prebuild": "npm run generate-icons",
+    "build": "vite build",
+    "preview": "vite preview",
+    "electron": "npx electron .",
+    "electron-dev": "concurrently \"npm run dev\" \"wait-on http://localhost:3000 && npm run electron\"",
+    "dist": "npm run build && npx electron-builder",
+    "setup-icon": "cp \"$HOME/Desktop/aman.png\" assets/icon.png || echo 'Desktop aman.png not found - please copy manually'",
+    "electron-build": "npm run build && npx electron-builder"
+  },
+  "dependencies": {
+    "@google/genai": "^1.4.0",
+    "classnames": "^2.5.1",
+    "eventemitter3": "^5.0.1",
+    "lodash": "^4.17.21",
+    "path": "^0.12.7",
+    "png2icons": "^2.0.1",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "vite": "^6.3.5",
+    "zustand": "^5.0.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "auto-launch": "^5.0.5",
+    "concurrently": "^9.2.1",
+    "electron": "^26.0.0",
+    "electron-builder": "^24.0.0",
+    "electron-is-dev": "^3.0.1",
+    "icns": "^0.1.0",
+    "sharp": "^0.32.6",
+    "to-ico": "^1.1.5",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0",
+    "wait-on": "^9.0.3"
+  },
+  "build": {
+    "productName": "aman",
+    "appId": "com.conversational-ai.app",
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "node_modules/**/*"
+    ],
+    "directories": {
+      "buildResources": "assets"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ]
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    }
+  }
+}

@@ -1,0 +1,197 @@
+name: Build and Package
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node: [18]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate icons
+        run: npm run generate-icons
+
+      - name: Build renderer bundle
+        run: npm run build
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # Install extra tools sometimes required by electron-builder (optional)
+          sudo apt-get install -y --no-install-recommends icnsutils graphicsmagick xz-utils
+          npx electron-builder --linux AppImage deb --publish never
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          npx electron-builder --windows nsis portable --publish never
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          npx electron-builder --mac dmg zip --publish never
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts-${{ runner.os }}
+          path: |
+            dist/**
+            build/**
+            out/**
+
+      - name: Generate release notes (with PR links, PR descriptions & contributors)
+        if: startsWith(github.ref, 'refs/tags/') && runner.os == 'Linux'
+        id: generate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --prune
+          TAG=${GITHUB_REF_NAME}
+          PREV_TAG=$(git tag --sort=-creatordate | grep -v "^${TAG}$" | head -n1 || true)
+
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..${TAG}"
+          else
+            RANGE="${TAG}"
+          fi
+
+          # Collect commits: message | short-sha | author-name | author-email
+          COMMITS=$(git log --pretty=format:'%s|%h|%an|%ae' ${RANGE})
+
+          BODY=""
+          declare -A AUTHORS=()
+          declare -A PRS=()
+
+          while IFS= read -r LINE; do
+            MSG="${LINE%%|*}"
+            REST="${LINE#*|}"
+            SHA="${REST%%|*}"
+            REST2="${REST#*|}"
+            AN="${REST2%%|*}"
+            AE="${REST2#*|}"
+
+            # Try extract PR number from common patterns: (#123), pull request #123, Merge pull request #123
+            PR=$(echo "$MSG" | grep -oE '\(#([0-9]+)\)' | grep -oE '[0-9]+' || true)
+            if [ -z "$PR" ]; then
+              PR=$(echo "$MSG" | grep -oE 'pull request #([0-9]+)' | grep -oE '[0-9]+' || true)
+            fi
+            if [ -n "$PR" ]; then
+              PRS["$PR"]=1
+              PR_LINK="https://github.com/${GITHUB_REPOSITORY}/pull/${PR}"
+              BODY+="- ${MSG} ([#${PR}](${PR_LINK})) (${SHA})\n"
+            else
+              BODY+="- ${MSG} (${SHA})\n"
+            fi
+
+            AUTHORS["${AN}|${AE}"]=1
+          done <<< "$COMMITS"
+
+          # If we found PRs, fetch PR titles and bodies via GitHub API
+          PR_SECTION=""
+          if [ ${#PRS[@]} -gt 0 ]; then
+            PR_LIST=(${!PRS[@]})
+            echo "Found PRs: ${PR_LIST[*]}"
+            PR_SECTION+="\n## Pull Requests\n"
+            # Use Python to fetch PR details reliably
+            PR_DETAILS=$(python3 - <<PY
+import os,sys,urllib.request,json
+repo=os.environ['GITHUB_REPOSITORY']
+token=os.environ.get('GITHUB_TOKEN')
+prs=sys.argv[1:]
+out=[]
+for p in prs:
+    url=f"https://api.github.com/repos/{repo}/pulls/{p}"
+    req=urllib.request.Request(url, headers={'Accept':'application/vnd.github.v3+json','User-Agent':'release-script'})
+    if token:
+        req.add_header('Authorization', f'token {token}')
+    try:
+        with urllib.request.urlopen(req) as r:
+            data=json.load(r)
+        title=data.get('title','').strip()
+        body=data.get('body','') or ''
+        user=data.get('user',{}).get('login','')
+        pr_line=f"### PR #{p} - {title} (by @{user})\n\n"
+        # sanitize body
+        if body:
+            body = body.strip() + "\n"
+        pr_block = pr_line + body
+        out.append(pr_block)
+    except Exception as e:
+        out.append(f"### PR #{p}\nCould not fetch PR details: {e}\n")
+print('\n'.join(out))
+PY
+            "${PR_LIST[@]}")
+
+            PR_SECTION+="$PR_DETAILS\n"
+            BODY+="$PR_SECTION"
+          fi
+
+          # Build contributors list, try to map emails to GitHub logins when token is available
+          CONTRIBUTORS=()
+          for KEY in "${!AUTHORS[@]}"; do
+            NAME="${KEY%%|*}"
+            EMAIL="${KEY#*|}"
+            LOGIN=""
+            if [ -n "${GITHUB_TOKEN:-}" ]; then
+              # URL-encode the email for the query
+              Q=$(python3 - <<PY
+import urllib.parse,sys
+print(urllib.parse.quote(sys.argv[1]))
+PY
+              "$EMAIL")
+              RES=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" "https://api.github.com/search/users?q=${Q}+in:email") || true
+              LOGIN=$(echo "$RES" | grep -o '"login": *"[^"]*"' | head -n1 | sed -E 's/.*"([^\"]+)".*/\1/') || true
+            fi
+            if [ -n "$LOGIN" ]; then
+              CONTRIBUTORS+=("@${LOGIN}")
+            else
+              CONTRIBUTORS+=("${NAME}")
+            fi
+          done
+
+          # Join contributors with comma
+          CONTRIBUTORS_LINE=$(IFS=", "; echo "${CONTRIBUTORS[*]}")
+          BODY+="\nContributors: ${CONTRIBUTORS_LINE}\n"
+
+          echo "name=Release ${TAG}" >> $GITHUB_OUTPUT
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release and upload artifacts
+        if: startsWith(github.ref, 'refs/tags/') && runner.os == 'Linux'
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ github.ref_name }}
+          name: ${{ steps.generate.outputs.name }}
+          body: ${{ steps.generate.outputs.body }}
+          files: |
+            dist/**
+            build/**
+            out/**
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Complete
+        run: echo "Packaging complete on ${RUNNER_OS}"
